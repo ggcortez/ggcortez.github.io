@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cast Receiver</title>
+<script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<script src="pgs-overlay.js"></script>
+<style>
+  html, body { margin: 0; background: #000; width: 100%; height: 100%; overflow: hidden; }
+  cast-media-player { width: 100%; height: 100%; }
+
+  #pgs-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    object-fit: contain;
+  }
+
+  #text-overlay {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 8%;
+    text-align: center;
+    pointer-events: none;
+    font-family: sans-serif;
+    font-size: 3.2vh;
+    line-height: 1.4;
+    color: #fff;
+    text-shadow: 0 0 4px #000, 0 0 8px #000;
+    white-space: pre-line;
+  }
+  #text-overlay span {
+    background: rgba(0, 0, 0, 0.6);
+    padding: 0.1em 0.4em;
+    border-radius: 0.15em;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+</style>
+</head>
+<body>
+<cast-media-player></cast-media-player>
+<canvas id="pgs-overlay" width="1920" height="1080"></canvas>
+<div id="text-overlay"></div>
+<script>
+'use strict';
+
+const context = cast.framework.CastReceiverContext.getInstance();
+const playerManager = context.getPlayerManager();
+const overlay = new PgsRenderer(document.getElementById('pgs-overlay'));
+const CAPTION_NAMESPACE = 'urn:x-cast:app.stream.captions';
+
+const SUP_REFRESH_MS = 20000;
+
+let renderTimer = null;
+let refreshTimer = null;
+let activeSupUrl = null;
+
+function startOverlayClock() {
+  if (renderTimer !== null) return;
+  renderTimer = setInterval(() => {
+    overlay.renderAt(playerManager.getCurrentTimeSec());
+  }, 100);
+}
+
+function stopOverlayClock() {
+  if (renderTimer !== null) {
+    clearInterval(renderTimer);
+    renderTimer = null;
+  }
+  if (refreshTimer !== null) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+  activeSupUrl = null;
+  overlay.clear();
+}
+
+async function refreshActiveSup() {
+  if (!activeSupUrl) return;
+  try {
+    const sets = await overlay.load(`${activeSupUrl}?t=${Date.now()}`);
+    console.log(`[stream] pgs refresh, displaySets=${sets}`);
+  } catch (error) {
+    console.warn(`[stream] pgs refresh failed: ${error.message}`);
+  }
+}
+
+async function activatePgs(url) {
+  try {
+    const sets = await overlay.load(url);
+    activeSupUrl = url;
+    startOverlayClock();
+    if (refreshTimer === null) {
+      refreshTimer = setInterval(refreshActiveSup, SUP_REFRESH_MS);
+    }
+    console.log(`[stream] pgs overlay active, displaySets=${sets}`);
+  } catch (error) {
+    console.warn(`[stream] pgs overlay failed: ${error.message}`);
+    stopOverlayClock();
+  }
+}
+
+const textOverlayElement = document.getElementById('text-overlay');
+const VTT_REFRESH_MS = 20000;
+
+let textCues = [];
+let textRenderTimer = null;
+let textRefreshTimer = null;
+let activeVttUrl = null;
+let renderedCueText = null;
+
+function parseWebVTT(body) {
+  const timestamp = (raw) => {
+    const match = raw.match(/(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})/);
+    if (!match) return null;
+    return (Number(match[1] || 0) * 3600)
+      + (Number(match[2]) * 60)
+      + Number(match[3])
+      + (Number(match[4]) / 1000);
+  };
+  const cues = [];
+  const blocks = body.replace(/\r/g, '').split(/\n\n+/);
+  for (const block of blocks) {
+    const lines = block.split('\n').filter((line) => line.length > 0);
+    const timingIndex = lines.findIndex((line) => line.includes('-->'));
+    if (timingIndex < 0) continue;
+    const [rawStart, rawEnd] = lines[timingIndex].split('-->');
+    const start = timestamp(rawStart);
+    const end = timestamp(rawEnd || '');
+    if (start === null || end === null) continue;
+    const text = lines.slice(timingIndex + 1)
+      .join('\n')
+      .replace(/<[^>]*>/g, '')
+      .trim();
+    if (text.length > 0) {
+      cues.push({ start, end, text });
+    }
+  }
+  cues.sort((a, b) => a.start - b.start);
+  return cues;
+}
+
+function renderTextAt(seconds) {
+  const active = textCues.filter(
+    (cue) => seconds >= cue.start && seconds < cue.end,
+  );
+  const text = active.map((cue) => cue.text).join('\n');
+  if (text === renderedCueText) return;
+  renderedCueText = text;
+  textOverlayElement.textContent = '';
+  if (text.length > 0) {
+    const span = document.createElement('span');
+    span.textContent = text;
+    textOverlayElement.appendChild(span);
+  }
+}
+
+async function refreshActiveVtt() {
+  if (!activeVttUrl) return;
+  try {
+    const response = await fetch(`${activeVttUrl}?t=${Date.now()}`);
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    const cues = parseWebVTT(await response.text());
+    textCues = cues;
+    console.log(`[stream] vtt refresh, cues=${cues.length}`);
+  } catch (error) {
+    console.warn(`[stream] vtt refresh failed: ${error.message}`);
+  }
+}
+
+function stopTextOverlay() {
+  if (textRenderTimer !== null) {
+    clearInterval(textRenderTimer);
+    textRenderTimer = null;
+  }
+  if (textRefreshTimer !== null) {
+    clearInterval(textRefreshTimer);
+    textRefreshTimer = null;
+  }
+  activeVttUrl = null;
+  textCues = [];
+  renderedCueText = null;
+  textOverlayElement.textContent = '';
+}
+
+function activateText(url) {
+  activeVttUrl = url;
+  textCues = [];
+  renderedCueText = null;
+  refreshActiveVtt();
+  if (textRenderTimer === null) {
+    textRenderTimer = setInterval(() => {
+      renderTextAt(playerManager.getCurrentTimeSec());
+    }, 100);
+  }
+  if (textRefreshTimer === null) {
+    textRefreshTimer = setInterval(refreshActiveVtt, VTT_REFRESH_MS);
+  }
+  console.log('[stream] text overlay active');
+}
+
+playerManager.setMessageInterceptor(
+  cast.framework.messages.MessageType.LOAD,
+  (request) => {
+    stopOverlayClock();
+    stopTextOverlay();
+    const customData = (request.media && request.media.customData) || {};
+    if (customData.pgsUrl) {
+      activatePgs(customData.pgsUrl);
+    }
+    if (customData.textUrl) {
+      activateText(customData.textUrl);
+    }
+    return request;
+  },
+);
+
+context.addCustomMessageListener(CAPTION_NAMESPACE, (event) => {
+  const data = event.data || {};
+  if (data.type === 'pgs' && data.url) {
+    stopTextOverlay();
+    activatePgs(data.url);
+  } else if (data.type === 'off') {
+    stopOverlayClock();
+  } else if (data.type === 'text' && data.url) {
+    stopOverlayClock();
+    activateText(data.url);
+  } else if (data.type === 'text-off') {
+    stopTextOverlay();
+  }
+});
+
+playerManager.addEventListener(
+  cast.framework.events.EventType.MEDIA_FINISHED,
+  () => {
+    stopOverlayClock();
+    stopTextOverlay();
+  },
+);
+
+context.start();
+</script>
+</body>
+</html>

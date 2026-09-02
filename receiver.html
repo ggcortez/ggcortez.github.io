@@ -242,12 +242,7 @@ playerManager.addEventListener(
   },
 );
 
-const receiverOptions = new cast.framework.CastReceiverOptions();
-receiverOptions.playbackConfig = new cast.framework.PlaybackConfig();
-receiverOptions.playbackConfig.shakaConfig = {
-  streaming: { bufferBehind: 300, bufferingGoal: 45 },
-};
-context.start(receiverOptions);
+context.start();
 </script>
 </body>
 </html>

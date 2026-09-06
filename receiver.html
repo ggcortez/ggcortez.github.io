@@ -221,9 +221,49 @@ playerManager.setMessageInterceptor(
   },
 );
 
+async function reportVideoCapability(event) {
+  const data = event.data;
+  let supported = null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const response = await fetch(data.manifestUrl, { signal: controller.signal });
+    if (!response.ok) throw new Error('manifest unavailable');
+    const doc = new DOMParser().parseFromString(await response.text(), 'application/xml');
+    if (doc.querySelector('parsererror')) throw new Error('invalid manifest');
+    const results = [];
+    for (const rep of doc.querySelectorAll('Representation')) {
+      const adaptation = rep.parentElement;
+      const attr = (name) => rep.getAttribute(name) || adaptation.getAttribute(name);
+      const mime = attr('mimeType');
+      const codecs = (attr('codecs') || '').split(',').map((value) => value.trim())
+        .filter((value) => /^(hev1|hvc1|avc1|avc3|vp09|av01)\./.test(value));
+      if (!mime || !mime.startsWith('video/') || !codecs.length) continue;
+      const width = Number(attr('width')) || undefined;
+      const height = Number(attr('height')) || undefined;
+      const rate = (attr('frameRate') || '').split('/').map(Number);
+      const fps = rate.length === 2 ? rate[0] / rate[1] : rate[0];
+      results.push(context.canDisplayType(mime, codecs.join(','), width, height,
+        Number.isFinite(fps) && fps > 0 ? fps : undefined));
+    }
+    if (results.length) supported = results.every(Boolean);
+  } catch (e) {
+    supported = null;
+  } finally {
+    clearTimeout(timer);
+  }
+  try {
+    context.sendCustomMessage(CAPTION_NAMESPACE, event.senderId, {
+      type: 'video-capability-result', requestId: data.requestId, supported,
+    });
+  } catch (e) {}
+}
+
 context.addCustomMessageListener(CAPTION_NAMESPACE, (event) => {
   const data = event.data || {};
-  if (data.type === 'pgs' && data.url) {
+  if (data.type === 'video-capability' && typeof data.manifestUrl === 'string') {
+    void reportVideoCapability(event);
+  } else if (data.type === 'pgs' && data.url) {
     stopTextOverlay();
     activatePgs(data.url);
   } else if (data.type === 'off') {

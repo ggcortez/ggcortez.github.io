@@ -265,6 +265,21 @@ function bufferedAheadSeconds() {
   return 0;
 }
 
+let windowBytes = 0;
+let windowDownloadMs = 0;
+let windowSegments = 0;
+
+playerManager.addEventListener(
+  cast.framework.events.EventType.SEGMENT_DOWNLOADED,
+  (event) => {
+    if (typeof event.size === 'number' && typeof event.downloadTime === 'number') {
+      windowBytes += event.size;
+      windowDownloadMs += event.downloadTime;
+      windowSegments += 1;
+    }
+  },
+);
+
 setInterval(() => {
   const senders = context.getSenders();
   if (!senders || !senders.length) return;
@@ -275,10 +290,16 @@ setInterval(() => {
     state: playerManager.getPlayerState(),
     currentTime: playerManager.getCurrentTimeSec(),
     bufferedAhead: bufferedAheadSeconds(),
-    bandwidth: stats.streamBandwidth || null,
+    fetchMbps: windowDownloadMs > 0 ? (windowBytes * 8) / (windowDownloadMs * 1000) : null,
+    ingestMbps: (windowBytes * 8) / (STATS_INTERVAL_MS * 1000),
+    segments: windowSegments,
+    declaredMbps: stats.streamBandwidth ? stats.streamBandwidth / 1000000 : null,
     decodedFrames: stats.decodedFrames || null,
     droppedFrames: stats.droppedFrames || null,
   };
+  windowBytes = 0;
+  windowDownloadMs = 0;
+  windowSegments = 0;
   senders.forEach((sender) => {
     try { context.sendCustomMessage(CAPTION_NAMESPACE, sender.id, payload); } catch (e) {}
   });

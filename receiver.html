@@ -54,6 +54,8 @@ const overlay = new PgsRenderer(document.getElementById('pgs-overlay'));
 const CAPTION_NAMESPACE = 'urn:x-cast:app.stream.captions';
 
 const SUP_REFRESH_MS = 20000;
+const STATS_INTERVAL_MS = 10000;
+const BUFFERING_GOAL_SECONDS = 45;
 
 let renderTimer = null;
 let refreshTimer = null;
@@ -242,7 +244,51 @@ playerManager.addEventListener(
   },
 );
 
-context.start();
+function mediaElement() {
+  const player = document.querySelector('cast-media-player');
+  if (player && player.shadowRoot) {
+    const inner = player.shadowRoot.querySelector('video');
+    if (inner) return inner;
+  }
+  return document.querySelector('video');
+}
+
+function bufferedAheadSeconds() {
+  const video = mediaElement();
+  if (!video || !video.buffered) return null;
+  const t = video.currentTime;
+  for (let i = 0; i < video.buffered.length; i += 1) {
+    if (video.buffered.start(i) <= t + 0.5 && video.buffered.end(i) >= t) {
+      return Math.max(0, video.buffered.end(i) - t);
+    }
+  }
+  return 0;
+}
+
+setInterval(() => {
+  const senders = context.getSenders();
+  if (!senders || !senders.length) return;
+  let stats = {};
+  try { stats = playerManager.getStats() || {}; } catch (e) { stats = {}; }
+  const payload = {
+    type: 'stats',
+    state: playerManager.getPlayerState(),
+    currentTime: playerManager.getCurrentTimeSec(),
+    bufferedAhead: bufferedAheadSeconds(),
+    bandwidth: stats.streamBandwidth || null,
+    decodedFrames: stats.decodedFrames || null,
+    droppedFrames: stats.droppedFrames || null,
+  };
+  senders.forEach((sender) => {
+    try { context.sendCustomMessage(CAPTION_NAMESPACE, sender.id, payload); } catch (e) {}
+  });
+}, STATS_INTERVAL_MS);
+
+const playbackConfig = new cast.framework.PlaybackConfig();
+playbackConfig.shakaConfig = {
+  streaming: { bufferingGoal: BUFFERING_GOAL_SECONDS },
+};
+context.start({ playbackConfig });
 </script>
 </body>
 </html>
